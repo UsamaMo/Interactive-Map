@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Shoponomik Map</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+
+      #map {
+        height: 100vh;
+        width: 100%;
+      }
+
+      .popup-form {
+        display: flex;
+        flex-direction: column;
+      }
+      .popup-form label {
+        margin: 5px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Div element that will contain the map -->
+    <div id="map"></div>
+
+
+    <input
+      type="text"
+      id="search"
+      placeholder="Search markers..."
+      style="
+        position: fixed;
+        top: 20px;
+        left: 75px;
+        z-index: 1000;
+        padding: 5px;
+      "
+    />
+
+    <button
+      id="clearMarkers"
+      style="
+        position: fixed;
+        bottom: 30px;
+        left: 10px;
+        z-index: 1000;
+        padding: 2px;
+      "
+    >
+      Clear Markers
+    </button>
+
+    <button
+      id="refreshMap"
+      style="
+        position: fixed;
+        bottom: 30px;
+        left: 105px;
+        z-index: 1000;
+        padding: 2px;
+      "
+    >
+      Refresh Map
+    </button>
+
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <!-- Linking the socket.io library for real-time communication for both client and backend-->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      // Initializing a socket connection (Client Side)
+      const socket = io();
+
+      // Initializing the map and setting its view to the specified coordinates and zoom level
+      const map = L.map("map").setView([33.844, -118.388], 13);
+
+
+
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(map);
+
+   
+      const markers = new Map();
+      let markerList = []
+      let selectedMarkers = [];
+      let polylines = [];
+
+      map.on("click", async (e) => {
+        const type = prompt("Enter the location:");
+        const details = prompt("Enter description for this location:");
+
+        // Getting amenities asynchronously
+        const amenities = await getAmenities();
+
+
+        const newMarker = {
+          id: Date.now(), 
+          latlng: e.latlng, 
+          type: type || "No type provided",
+          details: details || "No details provided",
+          amenities: amenities || "No amenities provided",
+        };
+ 
+        socket.emit("placeIcon", newMarker);
+      });
+
+
+      socket.on("placeIcon", (data) => {
+        data.forEach((marker) => {
+          const m = L.marker(marker.latlng)
+            .addTo(map)
+            .bindPopup(
+          `<b>Coordinates:</b> ${JSON.stringify(marker.latlng)}<br/>
+           <b>Location:</b> ${marker.type}<br/>
+           <b>Description:</b> ${marker.details}<br/>
+           <b>Amenities:</b><ul>${marker.amenities
+             .split(", ")
+             .map((item) => `<li>${item}</li>`)
+             .join("")}</ul>
+           <button class="remove-marker" data-id="${marker.id}">Remove</button>
+           <button class="select-marker" data-id="${
+             marker.id
+           }">Select Marker</button>`
+            )
+            // Adding event listeners for the buttons in the marker popup
+            .on("popupopen", () => {
+              const removeButton = document.querySelector(
+                `.remove-marker[data-id="${marker.id}"]`
+              );
+              const selectButton = document.querySelector(
+                `.select-marker[data-id="${marker.id}"]`
+              );
+
+              if (removeButton) {
+                removeButton.addEventListener("click", () => {
+                  console.log(
+                    `Remove button clicked for marker id: ${marker.id}`
+                  );
+                  removeMarker(marker.id);
+                });
+              }
+
+              if (selectButton) {
+                selectButton.addEventListener("click", () => {
+                  console.log(
+                    `Select button clicked for marker id: ${marker.id}`
+                  );
+                  selectMarker(marker.id);
+                });
+              }
+            });
+  
+          markers.set(marker.id, m);
+          markerList.push(marker);
+        });
+      });
+
+      // Handling the 'removeIcon' event from the server
+      socket.on("removeIcon", (id) => {
+        console.log(`Received removeIcon event for marker id: ${id}`);
+        if (markers.has(id)) {
+          // Removing the marker from the map and updating the markers map and markerList array
+          map.removeLayer(markers.get(id));
+          markers.delete(id);  
+          markerList = markerList.filter((marker) => marker.id !== id); //removing the marker and making sure that the marker id does not exist
+          removePolylines();  //remove polylines attached to the marker
+          console.log(`Marker with id: ${id} removed`);
+
+          showNotification(`Marker removed`);
+        } else {
+          console.log(`Marker with id: ${id} not found`);
+        }
+      });
+
+      // Function to emit a 'removeIcon' event to the server
+      function removeMarker(id) {
+        console.log(`Emitting removeIcon event for marker id: ${id}`);
+        socket.emit("removeIcon", id);
+      }
+
+      // Function to handle marker selection
+      function selectMarker(id) {
+        const marker = markers.get(id);
+        selectedMarkers.push(marker);
+        console.log(
+          `Selected markers: ${selectedMarkers.map((m) => m.getLatLng())}`
+        );
+        if (selectedMarkers.length === 2) {
+          // Calculating the distance between the selected markers and drawing a line between them
+          const latlng1 = selectedMarkers[0].getLatLng();
+          const latlng2 = selectedMarkers[1].getLatLng();
+          const distance = latlng1.distanceTo(latlng2) / 1000; // Convert to kilometers
+          console.log(`Distance between selected markers: ${distance} km`);
+          drawLine(latlng1, latlng2, distance);
+          selectedMarkers = []; 
+        }
+      }
+
+      // Function to draw a line between two points and display the distance
+      function drawLine(latlng1, latlng2, distance) {
+        const polyline = L.polyline([latlng1, latlng2], {
+          color: "blue",   //colour of the distance
+        }).addTo(map);
+        polylines.push(polyline);
+        const midPoint = L.latLng(
+          (latlng1.lat + latlng2.lat) / 2,
+          (latlng1.lng + latlng2.lng) / 2
+        );
+        L.popup()
+          .setLatLng(midPoint)
+          .setContent(`Distance: ${distance.toFixed(2)} km`)
+          .openOn(map);
+      }
+
+      // Function to remove all polylines from the map
+      function removePolylines() {
+        polylines.forEach((polyline) => {
+          map.removeLayer(polyline);
+        });
+        polylines = [];
+      }
+
+      // Event listener for the search input field
+      document.getElementById("search").addEventListener("input", (e) => {
+        const query = e.target.value.toLowerCase();
+        markers.forEach((marker, id) => {
+          const { type, details } = markerList.find((m) => m.id === id);
+          const matches =
+            type.toLowerCase().includes(query) ||
+            details.toLowerCase().includes(query);
+          if (matches) {
+            marker.addTo(map);
+          } else {
+            map.removeLayer(marker);
+          }
+        });
+      });
+
+      // Event listener for the 'clearMarkers' button
+      document.getElementById("clearMarkers").addEventListener("click", () => {
+        markers.forEach((marker) => map.removeLayer(marker));
+        markers.clear();
+        markerList = [];
+        removePolylines();
+        showNotification("All markers cleared");
+      });
+
+      // Event listener for the 'refreshMap' button
+      document.getElementById("refreshMap").addEventListener("click", () => {
+        location.reload();
+      });
+
+      // Function to get amenities from the user
+      function getAmenities() {
+        return new Promise((resolve) => {
+          // Creating a form for selecting amenities
+          const amenitiesForm = document.createElement("form");
+          amenitiesForm.className = "popup-form";
+          amenitiesForm.innerHTML = `
+      <h3>Amenities</h3>
+      <label><input type="checkbox" name="amenities" value="Gym"> Gym</label>
+      <label><input type="checkbox" name="amenities" value="Parking"> Parking</label>
+      <label><input type="checkbox" name="amenities" value="BikeRack"> Bike Rack</label>
+      <label><input type="checkbox" name="amenities" value="Theatre"> Theatre</label>
+      <label><input type="checkbox" name="amenities" value="Pool"> Pool</label>
+      <label><input type="checkbox" name="amenities" value="Restaurant"> Restaurant</label>
+      <button type="submit">Submit</button>
+    `;
+
+          // Displaying the form as a popup on the map
+          const popup = L.popup()
+            .setLatLng(map.getCenter())
+            .setContent(amenitiesForm)
+            .openOn(map);
+
+          // Handling form submission
+          amenitiesForm.addEventListener("submit", (e) => {
+            e.preventDefault();
+            const formData = new FormData(amenitiesForm);
+            const selectedAmenities = formData.getAll("amenities").join(", ");
+            map.closePopup(popup);
+            resolve(selectedAmenities);
+          });
+        });
+      }
+    </script>
+  </body>
+</html>
